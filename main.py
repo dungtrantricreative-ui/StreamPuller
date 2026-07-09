@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-StreamPuller - Torrent Movie Downloader
+StreamPuller v2.1 - Torrent Movie Downloader
 
-Auto-search YTS by movie name → download via libtorrent → normalize to MP4.
+Auto-search torrent by movie name (YTS + 1337x fallback)
+→ download via libtorrent → normalize to MP4.
 
 Usage:
     python main.py "Movie Title" [--quality 1080p] [--profile review]
@@ -20,43 +21,34 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
 
-# ── YTS Search with fallback domains ─────────────────────────────────
+# ── YTS Search ───────────────────────────────────────────────────────
 
-YTS_DOMAINS = ["yts.lt", "yts.ag", "yts.mx", "yts.bz", "yts.gg"]
-
-
-def _api_get(url, params, timeout=15):
-    """Make API request with retry logic."""
-    for attempt in range(2):
-        try:
-            r = requests.get(url, params=params, timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        except Exception:
-            time.sleep(1)
-    return None
+YTS_DOMAINS = ["yts.lt", "yts.ag", "yts.mx", "yts.bz"]
+YTS_TIMEOUT = 5  # seconds per domain (fast fail)
 
 
-def _search_yts(query: str, quality: str = "all", limit: int = 10) -> list:
-    """Search YTS API for movies across multiple domains."""
+def _yts_get(query: str, quality: str = "all", limit: int = 10) -> list:
+    """Search YTS API with fast timeout."""
     params = {
         "query_term": query,
         "sort_by": "seeds",
         "order_by": "desc",
         "limit": limit,
     }
-
-    data = None
     for domain in YTS_DOMAINS:
         url = f"https://{domain}/api/v2/list_movies.json"
-        result = _api_get(url, params)
-        if result and result.get("status") == "ok":
-            data = result.get("data", {})
-            break
+        try:
+            r = requests.get(url, params=params, timeout=YTS_TIMEOUT)
+            data = r.json()
+            if data.get("status") == "ok":
+                return _parse_yts_movies(data.get("data", {}), quality)
+        except Exception:
+            continue
+    return []
 
-    if not data:
-        return []
 
+def _parse_yts_movies(data: dict, quality: str) -> list:
+    """Parse YTS API response into structured movie list."""
     movies = []
     for m in data.get("movies", []):
         torrents = []
@@ -76,6 +68,8 @@ def _search_yts(query: str, quality: str = "all", limit: int = 10) -> list:
                         f"&tr=udp://tracker.opentrackr.org:1337/announce"
                         f"&tr=udp://open.tracker.cl:1337/announce"
                         f"&tr=udp://tracker.torrent.eu.org:451/announce"
+                        f"&tr=udp://tracker.dler.org:6969/announce"
+                        f"&tr=udp://bt2.archive.org:6969/announce"
                     ),
                 })
         if torrents:
@@ -83,13 +77,95 @@ def _search_yts(query: str, quality: str = "all", limit: int = 10) -> list:
             movies.append({
                 "title": m["title"],
                 "year": m["year"],
-                "rating": m["rating"],
+                "rating": m.get("rating", 0),
                 "genres": m.get("genres", []),
                 "runtime": m.get("runtime", 0),
                 "torrents": torrents,
                 "best_torrent": torrents[0],
             })
     return movies
+
+
+# ── 1337x Search (fallback) ──────────────────────────────────────────
+
+def _1337x_search(query: str, quality: str = "all", limit: int = 10) -> list:
+    """Search 1337x as fallback when YTS fails."""
+    try:
+        url = f"https://1337x.to/search/{query}/1/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code != 200:
+            return []
+
+        import re
+        rows = re.findall(
+            r'<td class="name"><a href="/torrent/(\d+)/([^"]+)">([^<]+)</a></td>'
+            r'.*?<td>([\d.]+)</td>.*?<td>(\d+)</td>.*?<td>(\d+)</td>',
+            r.text, re.DOTALL | re.IGNORECASE
+        )
+
+        results = []
+        for tid, slug, name, size_str, seeds, leechs in rows[:limit]:
+            # Try to extract year
+            import re as re2
+            year_match = re2.search(r'\b(19|20)\d{2}\b', name)
+            year = int(year_match.group()) if year_match else 0
+
+            # Try to extract quality
+            q_match = re2.search(r'(1080p|720p|4k|2160p|480p)', name, re.IGNORECASE)
+            q = q_match.group(1) if q_match else "720p"
+
+            # Size parsing
+            size_bytes = _parse_size(size_str)
+
+            magnet = f"magnet:?xt=urn:btih:{slug.replace('-', '')[:40]}"
+            results.append({
+                "title": name,
+                "year": year,
+                "rating": 0,
+                "genres": [],
+                "runtime": 0,
+                "torrents": [{
+                    "quality": q,
+                    "size": size_str,
+                    "size_bytes": size_bytes,
+                    "seeds": int(seeds),
+                    "peers": int(leechs),
+                    "hash": slug[:40],
+                    "magnet": f"magnet:?xt=urn:btih:{slug.replace('-', '')[:40]}"
+                              f"&dn={name.replace(' ', '+')}"
+                              f"&tr=udp://tracker.opentrackr.org:1337/announce"
+                              f"&tr=udp://open.tracker.cl:1337/announce"
+                              f"&tr=udp://tracker.torrent.eu.org:451/announce"
+                              f"&tr=udp://tracker.dler.org:6969/announce",
+                }],
+                "best_torrent": None,
+            })
+
+        for r_item in results:
+            if r_item["torrents"]:
+                r_item["best_torrent"] = r_item["torrents"][0]
+
+        return results
+    except Exception:
+        return []
+
+
+def _parse_size(size_str: str) -> int:
+    """Parse human-readable size to bytes."""
+    import re
+    m = re.match(r'([\d.]+)\s*(GB|MB|KB)', size_str, re.IGNORECASE)
+    if not m:
+        return 0
+    val = float(m.group(1))
+    unit = m.group(2).upper()
+    if unit == "GB":
+        return int(val * 1024 * 1024 * 1024)
+    elif unit == "MB":
+        return int(val * 1024 * 1024)
+    elif unit == "KB":
+        return int(val * 1024)
+    return 0
 
 
 # ── Torrent Download ─────────────────────────────────────────────────
@@ -99,7 +175,7 @@ def _download_torrent(magnet: str, save_dir: str, timeout: int = 7200) -> dict:
     import libtorrent as lt
 
     os.makedirs(save_dir, exist_ok=True)
-    log.info("  Downloading torrent...")
+    log.info("  Starting torrent download...")
 
     ses = lt.session()
     ses.apply_settings({"connections_limit": 200})
@@ -109,7 +185,7 @@ def _download_torrent(magnet: str, save_dir: str, timeout: int = 7200) -> dict:
     handle = ses.add_torrent(atp)
     handle.resume()
 
-    log.info(f"  Torrent: {handle.name()}")
+    log.info(f"  Torrent name: {handle.name()}")
 
     start = time.time()
     last_pct = -1
@@ -119,7 +195,7 @@ def _download_torrent(magnet: str, save_dir: str, timeout: int = 7200) -> dict:
         s = handle.status()
         pct = s.progress * 100
 
-        # Progress logging
+        # Progress logging every 5%
         if pct - last_pct >= 5 or (time.time() - start) % 60 < 1:
             last_pct = pct
             mb_done = s.total_done / (1024 * 1024)
@@ -132,14 +208,14 @@ def _download_torrent(magnet: str, save_dir: str, timeout: int = 7200) -> dict:
 
         # Timeout check
         if time.time() - start > timeout:
-            log.warning(f"  Timeout ({timeout}s)")
+            log.warning(f"  Timeout ({timeout}s) - returning partial download")
             break
 
-        # Stalled detection
+        # Stalled detection (2 minutes no speed with peers)
         if s.download_rate < 1024 and s.num_peers > 0:
             stalled_count += 1
-            if stalled_count > 120:  # 2 minutes no speed
-                log.warning("  Stalled download, continuing anyway...")
+            if stalled_count > 120:
+                log.warning("  Stalled - no speed for 2 min, waiting more...")
                 stalled_count = 0
         else:
             stalled_count = 0
@@ -159,14 +235,13 @@ def _download_torrent(magnet: str, save_dir: str, timeout: int = 7200) -> dict:
                     largest_size = sz
                     largest = path
 
-    final = handle.status()
     ses.remove_torrent(handle)
 
     return {
         "success": largest is not None,
         "file_path": largest,
         "file_size": largest_size,
-        "downloaded_bytes": final.total_done,
+        "downloaded_bytes": handle.status().total_done,
         "elapsed": time.time() - start,
         "name": handle.name(),
     }
@@ -192,6 +267,7 @@ def _normalize(input_path: str, output_path: str, quality: str, profile: str) ->
     }
     codec, preset, crf, audio = profiles.get(profile, profiles["standard"])
 
+    # Scale filter (force aspect ratio, pad to exact resolution)
     scale_filter = (
         f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
@@ -212,7 +288,7 @@ def _normalize(input_path: str, output_path: str, quality: str, profile: str) ->
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
 
     if result.returncode != 0:
-        log.warning("  FFmpeg error, returning raw file")
+        log.warning("  FFmpeg error, returning original file")
         return {
             "success": True,
             "output_path": input_path,
@@ -240,7 +316,10 @@ def download_movie(
     seeders_min: int = 0,
     timeout: int = 7200,
 ) -> dict:
-    """Full pipeline: search → download → normalize."""
+    """Full pipeline: search → download → normalize.
+
+    Tries YTS first, then 1337x as fallback.
+    """
     t0 = time.time()
 
     log.info("=" * 50)
@@ -248,13 +327,22 @@ def download_movie(
     log.info(f"Quality: {quality} | Profile: {profile}")
     log.info("=" * 50)
 
-    # Step 1: Search
+    # Step 1: Search (YTS first, then 1337x fallback)
     log.info("[1/3] Searching torrents...")
-    results = _search_yts(title, quality=quality, limit=10)
+    results = _yts_get(title, quality=quality, limit=10)
+
     if not results:
-        log.error("No torrents found!")
+        log.info("  YTS returned no results, trying 1337x...")
+        results = _1337x_search(title, quality=quality, limit=10)
+
+    if not results:
+        log.error("No torrents found on any source!")
+        log.error("Tip: try a different title or use magnet link:")
+        log.error("  from main import download_by_magnet")
+        log.error("  download_by_magnet('magnet:?xt=...', output_dir=...)")
         return {"success": False, "errors": ["No torrents found"]}
 
+    log.info(f"  Found {len(results)} results!")
     for i, m in enumerate(results[:5]):
         bt = m["best_torrent"]
         log.info(
@@ -282,7 +370,7 @@ def download_movie(
     log.info(f"\nSelected: {chosen['movie_title']} | {chosen['quality']} | {chosen['seeds']} seeds")
 
     # Step 2: Download
-    log.info("[2/3] Downloading...")
+    log.info("[2/3] Downloading torrent...")
     dl_dir = os.path.join(output_dir, "_temp")
     dl = _download_torrent(chosen["magnet"], dl_dir, timeout=timeout)
 
@@ -296,12 +384,12 @@ def download_movie(
     )
 
     # Step 3: Normalize
-    log.info("[3/3] Normalizing...")
+    log.info("[3/3] Normalizing to MP4...")
     safe = chosen["movie_title"].replace(" ", "_").replace(":", "_").replace("/", "_")
     out_file = os.path.join(output_dir, f"{safe}_{chosen['quality']}.mp4")
     norm = _normalize(dl["file_path"], out_file, quality, profile)
 
-    # Cleanup
+    # Cleanup temp files
     try:
         import shutil
         shutil.rmtree(dl_dir)
@@ -336,7 +424,7 @@ def download_by_magnet(
     profile: str = "review",
     timeout: int = 7200,
 ) -> dict:
-    """Download directly from magnet link."""
+    """Download directly from magnet link (bypasses search)."""
     dl_dir = os.path.join(output_dir, "_temp")
     dl = _download_torrent(magnet, dl_dir, timeout=timeout)
     if not dl["success"] or not dl["file_path"]:
@@ -359,8 +447,11 @@ def download_by_magnet(
 
 
 def search_movie(title: str, quality: str = "all", limit: int = 5) -> list:
-    """Search without downloading."""
-    return _search_yts(title, quality=quality, limit=limit)
+    """Search torrents without downloading (YTS + 1337x)."""
+    results = _yts_get(title, quality=quality, limit=limit)
+    if not results:
+        results = _1337x_search(title, quality=quality, limit=limit)
+    return results
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
