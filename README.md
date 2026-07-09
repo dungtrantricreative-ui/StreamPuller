@@ -1,43 +1,42 @@
-# StreamPuller
+# StreamPuller v2.1
 
-Torrent Movie Downloader. Enter a movie name → auto-search → download → normalize to MP4 1080p.
+StreamPuller là một công cụ tải phim tự động từ Torrent (YTS & 1337x) và tự động chuẩn hóa video sang định dạng MP4 chất lượng cao bằng FFmpeg. Phiên bản 2.1 đã được cải tiến mạnh mẽ về hệ thống log và tính năng khám phá phim.
 
-Single-file. No dependencies besides libtorrent, requests, ffmpeg.
+## Các tính năng mới trong v2.1
+- **Hệ thống Log chi tiết:** Hiển thị rõ ràng thời gian, tiến trình tải Torrent và đặc biệt là hiển thị trực tiếp log từ FFmpeg.
+- **Khám phá Phim Hot:** Tìm kiếm danh sách các phim đang "hot" nhất dựa trên lượt chia sẻ (seeds).
+- **Cải thiện độ ổn định:** Xử lý lỗi kết nối, timeout và tự động dọn dẹp file tạm.
+- **Tối ưu cho Google Colab:** Dễ dàng cài đặt và chạy trên môi trường đám mây.
 
-## Install
-
+## Cài đặt
 ```bash
 sudo apt-get install -y ffmpeg
 pip install libtorrent requests
 ```
 
-## CLI Usage
-
+## Cách sử dụng
+### 1. Xem danh sách phim đang hot
 ```bash
-python main.py "Interstellar" -q 1080p -p review
-python main.py "magnet:?xt=urn:btih:..." -q 720p
+python main.py --hot-movies
 ```
 
-## Google Colab
-
-```python
-import subprocess, sys
-subprocess.run(["apt-get", "install", "-y", "ffmpeg"], capture_output=True)
-subprocess.run(["pip", "install", "libtorrent", "requests"], capture_output=True)
-subprocess.run(["git", "clone", "https://github.com/dungtrantricreative-ui/StreamPuller.git"], capture_output=True)
-sys.path.insert(0, '/content/StreamPuller')
-
-from main import download_movie
-result = download_movie("Interstellar", "/content/PhimTai", "1080p", "review")
+### 2. Tải phim theo tên
+```bash
+python main.py "Inception" --quality 1080p --profile review
 ```
 
-## Profiles
+### 3. Tải phim theo link Magnet
+```bash
+python main.py "magnet:?xt=urn:btih:..." --quality 720p
+```
 
-| Profile | CRF | Codec | Quality |
-|---------|-----|-------|---------|
-| review | 18 | H.264 | Best (largest) |
-| standard | 20 | H.264 | Balanced |
-| compressed | 23 | H.264 | Smaller |
-| h265 | 22 | H.265 | Most compressed |
+## Các tùy chọn nâng cao
+- `-o`, `--output`: Thư mục lưu kết quả (mặc định: `./downloads`).
+- `-q`, `--quality`: Chất lượng video (`4k`, `1080p`, `720p`, `480p`).
+- `-p`, `--profile`: Cấu hình nén (`review`, `standard`, `compressed`, `h265`).
 
+## Chạy trên Google Colab
+Xem chi tiết tại file [Colab_Guide.md](./Colab_Guide.md).
+
+---
 MIT License

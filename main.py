@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 StreamPuller v2.1 - Torrent Movie Downloader
@@ -8,6 +9,7 @@ Auto-search torrent by movie name (YTS + 1337x fallback)
 Usage:
     python main.py "Movie Title" [--quality 1080p] [--profile review]
     python main.py "magnet:?xt=urn:btih:..." [--quality 720p]
+    python main.py --hot-movies # New: Discover hot movies
 """
 import argparse
 import logging
@@ -15,10 +17,19 @@ import os
 import subprocess
 import sys
 import time
-
 import requests
+import json # Thêm import json để xử lý dữ liệu API
+import warnings
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+# Tắt các cảnh báo không cần thiết từ libtorrent
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Cấu hình logging chi tiết hơn
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 log = logging.getLogger(__name__)
 
 # ── YTS Search ───────────────────────────────────────────────────────
@@ -29,6 +40,7 @@ YTS_TIMEOUT = 5  # seconds per domain (fast fail)
 
 def _yts_get(query: str, quality: str = "all", limit: int = 10) -> list:
     """Search YTS API with fast timeout."""
+    log.info(f"Searching YTS for '{query}' with quality '{quality}'...")
     params = {
         "query_term": query,
         "sort_by": "seeds",
@@ -38,12 +50,20 @@ def _yts_get(query: str, quality: str = "all", limit: int = 10) -> list:
     for domain in YTS_DOMAINS:
         url = f"https://{domain}/api/v2/list_movies.json"
         try:
+            log.debug(f"Attempting YTS API call to {url}")
             r = requests.get(url, params=params, timeout=YTS_TIMEOUT)
+            r.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             data = r.json()
-            if data.get("status") == "ok":
+            if data.get("status") == "ok" and data.get("data", {}).get("movie_count", 0) > 0:
+                log.info(f"Successfully fetched results from {domain}")
                 return _parse_yts_movies(data.get("data", {}), quality)
-        except Exception:
-            continue
+            else:
+                log.warning(f"YTS API from {domain} returned no movies or status not 'ok'. Status: {data.get('status')}")
+        except requests.exceptions.RequestException as e:
+            log.warning(f"Could not fetch from YTS domain {domain}: {e}")
+        except json.JSONDecodeError as e:
+            log.error(f"Failed to decode JSON from YTS domain {domain}: {e}")
+    log.info("No results from YTS after trying all domains.")
     return []
 
 
@@ -90,11 +110,14 @@ def _parse_yts_movies(data: dict, quality: str) -> list:
 
 def _1337x_search(query: str, quality: str = "all", limit: int = 10) -> list:
     """Search 1337x as fallback when YTS fails."""
+    log.info(f"Searching 1337x for '{query}' with quality '{quality}'...")
     try:
         url = f"https://1337x.to/search/{query}/1/"
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=8)
+        r.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
         if r.status_code != 200:
+            log.warning(f"1337x returned status code {r.status_code}")
             return []
 
         import re
@@ -146,9 +169,13 @@ def _1337x_search(query: str, quality: str = "all", limit: int = 10) -> list:
             if r_item["torrents"]:
                 r_item["best_torrent"] = r_item["torrents"][0]
 
+        log.info(f"Found {len(results)} results from 1337x.")
         return results
-    except Exception:
-        return []
+    except requests.exceptions.RequestException as e:
+        log.error(f"Error fetching from 1337x: {e}")
+    except Exception as e:
+        log.error(f"An unexpected error occurred during 1337x search: {e}")
+    return []
 
 
 def _parse_size(size_str: str) -> int:
@@ -156,6 +183,7 @@ def _parse_size(size_str: str) -> int:
     import re
     m = re.match(r'([\d.]+)\s*(GB|MB|KB)', size_str, re.IGNORECASE)
     if not m:
+        log.warning(f"Could not parse size string: {size_str}")
         return 0
     val = float(m.group(1))
     unit = m.group(2).upper()
@@ -235,15 +263,19 @@ def _download_torrent(magnet: str, save_dir: str, timeout: int = 7200) -> dict:
                     largest_size = sz
                     largest = path
 
+    # Lưu lại thông tin trước khi remove
+    total_done = handle.status().total_done
+    torrent_name = handle.name()
+    
     ses.remove_torrent(handle)
 
     return {
         "success": largest is not None,
         "file_path": largest,
         "file_size": largest_size,
-        "downloaded_bytes": handle.status().total_done,
+        "downloaded_bytes": total_done,
         "elapsed": time.time() - start,
-        "name": handle.name(),
+        "name": torrent_name,
     }
 
 
@@ -285,7 +317,12 @@ def _normalize(input_path: str, output_path: str, quality: str, profile: str) ->
     ]
 
     log.info(f"  Normalizing to {quality} ({profile})...")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    # Chạy FFmpeg mà không capture output để hiển thị tiến trình trực tiếp
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    for line in process.stdout:
+        log.info(f"FFmpeg: {line.strip()}")
+    process.wait()
+    result = process
 
     if result.returncode != 0:
         log.warning("  FFmpeg error, returning original file")
@@ -339,7 +376,7 @@ def download_movie(
         log.error("No torrents found on any source!")
         log.error("Tip: try a different title or use magnet link:")
         log.error("  from main import download_by_magnet")
-        log.error("  download_by_magnet('magnet:?xt=...', output_dir=...)")
+        log.error("  download_by_magnet('magnet:?...', output_dir=...)")
         return {"success": False, "errors": ["No torrents found"]}
 
     log.info(f"  Found {len(results)} results!")
@@ -393,8 +430,8 @@ def download_movie(
     try:
         import shutil
         shutil.rmtree(dl_dir)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Failed to clean up temporary directory {dl_dir}: {e}")
 
     elapsed = time.time() - t0
     result = {
@@ -425,9 +462,16 @@ def download_by_magnet(
     timeout: int = 7200,
 ) -> dict:
     """Download directly from magnet link (bypasses search)."""
+    log.info("=" * 50)
+    log.info(f"StreamPuller | Downloading from magnet link")
+    log.info(f"Quality: {quality} | Profile: {profile}")
+    log.info("=" * 50)
+
     dl_dir = os.path.join(output_dir, "_temp")
     dl = _download_torrent(magnet, dl_dir, timeout=timeout)
+
     if not dl["success"] or not dl["file_path"]:
+        log.error("Download failed from magnet link!")
         return {"success": False, "errors": ["Download failed"]}
 
     if output_name:
@@ -440,32 +484,82 @@ def download_by_magnet(
     try:
         import shutil
         shutil.rmtree(dl_dir)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Failed to clean up temporary directory {dl_dir}: {e}")
 
     return {**norm, "success": norm["success"], "elapsed": dl["elapsed"]}
 
 
 def search_movie(title: str, quality: str = "all", limit: int = 5) -> list:
     """Search torrents without downloading (YTS + 1337x)."""
+    log.info(f"Searching for movie: {title}")
     results = _yts_get(title, quality=quality, limit=limit)
     if not results:
         results = _1337x_search(title, quality=quality, limit=limit)
     return results
 
 
+# ── Hot Movies Discovery ─────────────────────────────────────────────
+
+def get_hot_movies(limit: int = 10) -> list:
+    """Fetches a list of hot movies from YTS API based on seeds."""
+    log.info("Fetching hot movies from YTS...")
+    params = {
+        "sort_by": "seeds",
+        "order_by": "desc",
+        "limit": limit,
+        "genre": "all", # Có thể thêm các bộ lọc khác nếu cần
+    }
+    for domain in YTS_DOMAINS:
+        url = f"https://{domain}/api/v2/list_movies.json"
+        try:
+            log.debug(f"Attempting to fetch hot movies from {url}")
+            r = requests.get(url, params=params, timeout=YTS_TIMEOUT)
+            r.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            data = r.json()
+            if data.get("status") == "ok" and data.get("data", {}).get("movie_count", 0) > 0:
+                log.info(f"Successfully fetched hot movies from {domain}")
+                return data["data"]["movies"]
+            else:
+                log.warning(f"YTS API from {domain} returned no movies or status not 'ok'. Status: {data.get('status')}")
+        except requests.exceptions.RequestException as e:
+            log.warning(f"Could not fetch hot movies from {domain}: {e}")
+        except json.JSONDecodeError as e:
+            log.error(f"Failed to decode JSON from {domain}: {e}")
+    log.error("Failed to fetch hot movies from any YTS domain.")
+    return []
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StreamPuller - Torrent Movie Downloader")
-    parser.add_argument("target", help="Movie title or magnet link")
+    parser.add_argument("target", nargs="?", help="Movie title or magnet link") # target is now optional
     parser.add_argument("-o", "--output", default="./downloads", help="Output directory")
     parser.add_argument("-q", "--quality", choices=["4k", "1080p", "720p", "480p"], default="1080p")
     parser.add_argument("-p", "--profile", choices=["review", "standard", "compressed", "h265"], default="review")
     parser.add_argument("-s", "--seeders", type=int, default=0)
     parser.add_argument("-t", "--timeout", type=int, default=7200)
     parser.add_argument("-n", "--name", help="Custom output name (magnet only)")
+    parser.add_argument("--hot-movies", action="store_true", help="Display a list of hot movies") # New argument
     args = parser.parse_args()
+
+    if args.hot_movies:
+        log.info("""\n==================================================")
+        log.info("StreamPuller | Hot Movies Discovery")
+        log.info("==================================================""")
+        movies = get_hot_movies(limit=10)
+        if movies:
+            log.info("Top 10 Hot Movies:")
+            for i, m in enumerate(movies):
+                log.info(f"  {i+1}. {m['title']} ({m['year']}) - Rating: {m['rating']}/10")
+        else:
+            log.info("Could not retrieve hot movies at this time.")
+        sys.exit(0)
+
+    if not args.target:
+        parser.print_help()
+        sys.exit(1)
 
     if args.target.startswith("magnet:"):
         result = download_by_magnet(
@@ -479,7 +573,7 @@ if __name__ == "__main__":
         )
 
     if result["success"]:
-        print(f"\nOK: {result['output_path']} ({result['file_size']/(1024*1024):.1f} MB)")
+        log.info(f"\nOK: {result['output_path']} ({result['file_size']/(1024*1024):.1f} MB)")
     else:
-        print(f"\nFAIL: {result.get('errors')}")
+        log.error(f"\nFAIL: {result.get('errors', ['Unknown error'])}")
         sys.exit(1)
