@@ -1,44 +1,39 @@
+# Hướng dẫn chạy StreamPuller v3.0 trên Google Colab
 
-# Hướng dẫn chạy StreamPuller trên Google Colab
+Phiên bản 3.0 tích hợp **yt-dlp** giúp tải phim từ các nguồn link trực tiếp (Direct Link), khắc phục triệt để vấn đề Torrent không có seeds.
 
-Để chạy StreamPuller một cách dễ dàng và hiển thị log chi tiết trên Google Colab, bạn hãy thực hiện theo các bước sau:
-
-### Bước 1: Cài đặt môi trường
-Mở một notebook mới trên Colab và chạy đoạn mã sau để cài đặt các thư viện cần thiết:
+### Bước 1: Cài đặt môi trường (Chạy 1 lần duy nhất)
+Copy và chạy đoạn code sau trong một cell của Colab:
 
 ```python
+# 1. Cài đặt các thư viện Python cần thiết
+!pip install yt-dlp libtorrent requests
+
+# 2. Cài đặt công cụ hệ thống (FFmpeg)
+!apt-get update
 !apt-get install -y ffmpeg
-!pip install libtorrent requests
-!git clone https://github.com/dungtrantricreative-ui/StreamPuller.git
+```
+
+### Bước 2: Tải mã nguồn
+Nếu bạn chưa clone repository:
+```bash
+!git clone https://github.com/dungtrantricreative-ui/StreamPuller
 %cd StreamPuller
 ```
 
-### Bước 2: Xem danh sách phim đang hot
-Nếu bạn chưa biết nên tải phim gì, hãy chạy lệnh này để xem các phim đang được quan tâm nhiều nhất (dựa trên lượt seeds):
-
+### Bước 3: Chạy công cụ
+Bạn chỉ cần chạy lệnh sau và nhập tên phim khi được hỏi:
 ```python
-!python main.py --hot-movies
+!python main.py
 ```
 
-### Bước 3: Tải phim tự động
-Sau khi chọn được tên phim hoặc có link magnet, bạn có thể chạy lệnh tải. Log sẽ hiển thị chi tiết tiến trình tải torrent và tiến trình chuyển đổi của FFmpeg:
-
-**Tải theo tên phim:**
+**Hoặc chạy kèm tên phim để tự động hóa:**
 ```python
-!python main.py "Tên Phim Bạn Muốn" --quality 1080p
+!python main.py "Spider-Man Homecoming"
 ```
 
-**Tải theo link Magnet:**
-```python
-!python main.py "magnet:?xt=urn:btih:..." --quality 720p
-```
-
-### Lưu ý về Log:
-*   **Tiến trình Torrent:** Sẽ cập nhật mỗi 5% hoặc mỗi phút một lần.
-*   **Tiến trình FFmpeg:** Tôi đã cập nhật mã nguồn để hiển thị trực tiếp các dòng log từ FFmpeg, giúp bạn biết chính xác nó đang xử lý đến đâu thay vì chạy ngầm như trước.
-*   **Lỗi:** Nếu có lỗi xảy ra (ví dụ: không tìm thấy phim), chương trình sẽ in ra thông báo lỗi rõ ràng thay vì im lặng.
-
-### Tùy chỉnh nâng cao:
-*   `-o` hoặc `--output`: Thư mục lưu phim (mặc định là `./downloads`).
-*   `-q` hoặc `--quality`: Chất lượng phim (`4k`, `1080p`, `720p`, `480p`).
-*   `-p` hoặc `--profile`: Cấu hình nén (`review`, `standard`, `compressed`, `h265`).
+### Tại sao nên dùng v3.0?
+- **Tốc độ:** Tải trực tiếp từ server phim nên thường đạt tốc độ tối đa của đường truyền.
+- **Chắc chắn:** Không phụ thuộc vào số lượng người đang chia sẻ (seeds) như Torrent.
+- **Tự động:** Tool sẽ tự tìm link trực tiếp trước, nếu không có mới chuyển sang tìm Torrent.
+- **Log chi tiết:** Hiển thị rõ ràng tiến trình tải từng % một.
