@@ -1,2 +1,5 @@
+cerebras-cloud-sdk
+yt-dlp
 libtorrent
 requests
+ffmpeg-python
